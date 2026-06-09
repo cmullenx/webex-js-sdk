@@ -1537,6 +1537,7 @@ describe('webex.cc', () => {
     let mockWebSocketManager;
     let mercuryDisconnectSpy;
     let deviceUnregisterSpy;
+    let mockWindowCoordinator;
 
     beforeEach(() => {
       webex.cc.agentConfig = {
@@ -1553,6 +1554,15 @@ describe('webex.cc', () => {
       };
 
       webex.cc.services.webSocketManager = mockWebSocketManager;
+
+      // Set up mock WindowCoordinator — defaults to no other windows active
+      mockWindowCoordinator = {
+        hasOtherActiveWindows: jest.fn().mockReturnValue(false),
+        stop: jest.fn(),
+        start: jest.fn(),
+        getWindowId: jest.fn().mockReturnValue('test-window-id'),
+      };
+      webex.cc['windowCoordinator'] = mockWindowCoordinator;
 
       webex.internal = webex.internal || {};
       webex.internal.mercury = {
@@ -1692,6 +1702,66 @@ describe('webex.cc', () => {
       expect(mercuryDisconnectSpy).not.toHaveBeenCalled();
       expect(deviceUnregisterSpy).not.toHaveBeenCalled();
 
+      expect(mockWebSocketManager.close).toHaveBeenCalledWith(false, 'Unregistering the SDK');
+      expect(webex.cc.agentConfig).toBeNull();
+    });
+
+    it('should skip WebSocket teardown when other windows are active', async () => {
+      mockWindowCoordinator.hasOtherActiveWindows.mockReturnValue(true);
+
+      webex.cc.services.rtdWebSocketManager = {
+        isSocketClosed: false,
+        close: jest.fn(),
+        off: jest.fn(),
+        on: jest.fn(),
+      } as any;
+
+      await webex.cc.deregister();
+
+      // Event listeners should still be removed
+      expect(mockTaskManager.off).toHaveBeenCalledWith(
+        TASK_EVENTS.TASK_INCOMING,
+        expect.any(Function)
+      );
+      expect(mockWebSocketManager.off).toHaveBeenCalledWith('message', expect.any(Function));
+      expect(webex.cc.services.connectionService.off).toHaveBeenCalledWith(
+        'connectionLost',
+        expect.any(Function)
+      );
+
+      // WebSocket teardown should NOT happen
+      expect(webex.internal.mercury.off).not.toHaveBeenCalled();
+      expect(mercuryDisconnectSpy).not.toHaveBeenCalled();
+      expect(deviceUnregisterSpy).not.toHaveBeenCalled();
+      expect(mockWebSocketManager.close).not.toHaveBeenCalled();
+      expect(webex.cc.services.rtdWebSocketManager.close).not.toHaveBeenCalled();
+
+      // WindowCoordinator should still be stopped
+      expect(mockWindowCoordinator.stop).toHaveBeenCalled();
+
+      expect(LoggerProxy.log).toHaveBeenCalledWith(
+        'Other active windows detected, skipping WebSocket teardown to prevent agent idle state',
+        {module: CC_FILE, method: 'deregister'}
+      );
+
+      expect(LoggerProxy.log).toHaveBeenCalledWith('Deregistered successfully', {
+        module: CC_FILE,
+        method: 'deregister',
+      });
+    });
+
+    it('should stop the window coordinator during deregister', async () => {
+      await webex.cc.deregister();
+
+      expect(mockWindowCoordinator.stop).toHaveBeenCalled();
+    });
+
+    it('should handle deregister gracefully when windowCoordinator is not initialized', async () => {
+      webex.cc['windowCoordinator'] = undefined;
+
+      await webex.cc.deregister();
+
+      // Should proceed normally with WebSocket teardown (no other windows possible)
       expect(mockWebSocketManager.close).toHaveBeenCalledWith(false, 'Unregistering the SDK');
       expect(webex.cc.agentConfig).toBeNull();
     });

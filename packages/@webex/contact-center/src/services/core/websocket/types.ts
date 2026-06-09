@@ -38,3 +38,31 @@ export type ConnectionLostDetails = {
 export type ConnectionProp = {
   lostConnectionRecoveryTimeout: number;
 };
+
+/**
+ * Message types exchanged between browser windows/tabs via the WindowCoordinator's BroadcastChannel.
+ * @ignore
+ */
+export enum WindowCoordinatorMessageType {
+  /** Sent when a new window registers itself */
+  REGISTER = 'register',
+  /** Sent when a window is closing and unregistering */
+  UNREGISTER = 'unregister',
+  /** Periodic heartbeat to confirm window is still alive */
+  HEARTBEAT = 'heartbeat',
+  /** Sent in response to a register message to announce presence */
+  ANNOUNCE = 'announce',
+}
+
+/**
+ * Shape of messages exchanged via the WindowCoordinator BroadcastChannel.
+ * @ignore
+ */
+export type WindowCoordinatorMessage = {
+  /** The type of coordination message */
+  type: WindowCoordinatorMessageType;
+  /** Unique identifier for the originating window */
+  windowId: string;
+  /** Timestamp when the message was sent */
+  timestamp: number;
+};

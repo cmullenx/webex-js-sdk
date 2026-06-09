@@ -53,6 +53,7 @@ import {
   OutdialAniParams,
 } from './services/config/types';
 import {ConnectionLostDetails} from './services/core/websocket/types';
+import WindowCoordinator from './services/core/websocket/WindowCoordinator';
 import TaskManager from './services/task/TaskManager';
 import WebCallingService from './services/WebCallingService';
 import {
@@ -261,6 +262,15 @@ export default class ContactCenter extends WebexPlugin implements IContactCenter
    * @private
    */
   private metricsManager: MetricsManager;
+
+  /**
+   * Coordinator for multi-window/tab awareness.
+   * Tracks active browser windows to prevent premature WebSocket teardown
+   * when one window closes while others remain active.
+   * @type {WindowCoordinator}
+   * @private
+   */
+  private windowCoordinator: WindowCoordinator;
 
   /**
    * API instance for managing Webex Contact Center entry points
@@ -498,6 +508,10 @@ export default class ContactCenter extends WebexPlugin implements IContactCenter
       this.setupEventListeners();
       this.services.webSocketManager.on('message', this.handleWebsocketMessage);
 
+      // Start multi-window coordination to track peer windows
+      this.windowCoordinator = new WindowCoordinator();
+      this.windowCoordinator.start();
+
       const resp = await this.connectWebsocket();
       // Ensure 'dn' is always populated from 'defaultDn'
       resp.dn = resp.defaultDn;
@@ -537,13 +551,16 @@ export default class ContactCenter extends WebexPlugin implements IContactCenter
   }
 
   /**
-   * Unregisters the Contact Center SDK by closing all web socket connections, removing event listeners,
-   * and cleaning up internal state.
+   * Unregisters the Contact Center SDK by removing event listeners and cleaning up internal state.
+   * When no other browser windows/tabs are active, it also closes all WebSocket connections.
+   * If other windows are detected (via {@link WindowCoordinator}), WebSocket teardown is skipped
+   * to prevent the backend from setting the agent to Idle due to a WebSocket disconnect.
    *
    * @remarks
    * This method only disconnects the SDK from the backend and cleans up resources. It does NOT perform a station logout
    * (i.e., the agent remains logged in to the contact center unless you explicitly call {@link stationLogout}).
    * Use this when you want to fully tear down the SDK instance, such as during application shutdown or user sign-out.
+   * In multi-window scenarios, only the last window to close will perform WebSocket teardown.
    *
    * @returns {Promise<void>} Resolves when deregistration and cleanup are complete.
    * @throws {Error} If deregistration fails.
@@ -574,6 +591,15 @@ export default class ContactCenter extends WebexPlugin implements IContactCenter
         METRIC_EVENT_NAMES.WEBSOCKET_DEREGISTER_FAIL,
       ]);
 
+      const hasOtherWindows = this.windowCoordinator?.hasOtherActiveWindows() ?? false;
+
+      if (hasOtherWindows) {
+        LoggerProxy.log(
+          'Other active windows detected, skipping WebSocket teardown to prevent agent idle state',
+          {module: CC_FILE, method: METHODS.DEREGISTER}
+        );
+      }
+
       this.taskManager.off(TASK_EVENTS.TASK_INCOMING, this.handleIncomingTask);
       this.taskManager.off(TASK_EVENTS.TASK_HYDRATE, this.handleTaskHydrate);
       this.taskManager.off(
@@ -586,29 +612,42 @@ export default class ContactCenter extends WebexPlugin implements IContactCenter
       this.services.rtdWebSocketManager.off('message', this.handleRTDWebsocketMessage);
       this.services.connectionService.off('connectionLost', this.handleConnectionLost);
 
-      if (
-        this.agentConfig.webRtcEnabled &&
-        this.agentConfig.loginVoiceOptions.includes(LoginOption.BROWSER)
-      ) {
-        if (this.$webex.internal.mercury.connected) {
-          this.$webex.internal.mercury.off('online');
-          this.$webex.internal.mercury.off('offline');
-          await this.$webex.internal.mercury.disconnect();
-          // @ts-ignore
-          await this.$webex.internal.device.unregister();
-          LoggerProxy.log(MERCURY_DISCONNECTED_SUCCESS, {
-            module: CC_FILE,
-            method: METHODS.DEREGISTER,
-          });
+      // Only tear down WebSocket connections if no other windows are active.
+      // When other windows exist, they maintain their own WebSocket connections,
+      // so closing this one would cause the backend to set the agent to Idle.
+      if (!hasOtherWindows) {
+        if (
+          this.agentConfig.webRtcEnabled &&
+          this.agentConfig.loginVoiceOptions.includes(LoginOption.BROWSER)
+        ) {
+          if (this.$webex.internal.mercury.connected) {
+            this.$webex.internal.mercury.off('online');
+            this.$webex.internal.mercury.off('offline');
+            await this.$webex.internal.mercury.disconnect();
+            // @ts-ignore
+            await this.$webex.internal.device.unregister();
+            LoggerProxy.log(MERCURY_DISCONNECTED_SUCCESS, {
+              module: CC_FILE,
+              method: METHODS.DEREGISTER,
+            });
+          }
+        }
+
+        if (!this.services.webSocketManager.isSocketClosed) {
+          this.services.webSocketManager.close(false, 'Unregistering the SDK');
+        }
+
+        if (
+          this.services.rtdWebSocketManager &&
+          !this.services.rtdWebSocketManager.isSocketClosed
+        ) {
+          this.services.rtdWebSocketManager.close(false, 'Unregistering the RTD websocket');
         }
       }
 
-      if (!this.services.webSocketManager.isSocketClosed) {
-        this.services.webSocketManager.close(false, 'Unregistering the SDK');
-      }
-
-      if (this.services.rtdWebSocketManager && !this.services.rtdWebSocketManager.isSocketClosed) {
-        this.services.rtdWebSocketManager.close(false, 'Unregistering the RTD websocket');
+      // Stop window coordination
+      if (this.windowCoordinator) {
+        this.windowCoordinator.stop();
       }
 
       // Clear any cached agent configuration

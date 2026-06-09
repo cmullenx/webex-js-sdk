@@ -55,4 +55,6 @@ export const METHODS = {
   GET_BASE_URL: 'getBaseUrl',
   SEND_EVENT: 'sendEvent',
   FETCH_HISTORIC_TRANSCRIPTS: 'fetchHistoricTranscripts',
+  WINDOW_COORDINATOR_START: 'windowCoordinatorStart',
+  WINDOW_COORDINATOR_STOP: 'windowCoordinatorStop',
 };
